@@ -61,8 +61,8 @@ def fetch_sheet_as_rows(sheet_name):
         raise RuntimeError(f"Ошибка запроса к Google Sheets: {e}")
     if resp.status_code != 200:
         raise RuntimeError(f"Не удалось скачать лист '{sheet_name}'. HTTP {resp.status_code}")
-    # Устанавливаем корректную кодировку, если сервер её не указал
-    resp.encoding = resp.apparent_encoding or "utf-8"
+    # Google Sheets всегда отдаёт UTF-8
+    resp.encoding = 'utf-8'
     text = resp.text
     reader = csv.reader(text.splitlines())
     rows = [row for row in reader]
@@ -116,19 +116,17 @@ def validate_identifier_and_lookup(identifier):
 
     # Ожидаем, что есть заголовок в первой строке. Проверяем строки, начиная со второй.
     for idx, row in enumerate(rows[1:], start=2):
+        # Пропускаем пустые строки или строки с недостаточным количеством колонок
+        if not row or len(row) <= 5:
+            continue
+        
         # Колонка D -> индекс 3, колонка F -> индекс 5
-        sheet_personnel = ""
-        sheet_hire = ""
-        try:
-            sheet_personnel = str(row[3]).strip()
-        except Exception:
-            sheet_personnel = ""
-        try:
-            sheet_hire = normalize_date_value(row[5])
-        except Exception:
-            sheet_hire = normalize_date_value(row[5] if len(row) > 5 else "")
-        if sheet_personnel.replace(" ", "") == personnel.replace(" ", "") and sheet_hire == hire_date:
+        sheet_personnel = str(row[3]).strip() if len(row) > 3 else ""
+        sheet_hire = normalize_date_value(row[5]) if len(row) > 5 else ""
+        
+        if sheet_personnel == personnel and sheet_hire == hire_date:
             return True, personnel, hire_date
+    
     return False, personnel, hire_date
 
 
@@ -175,11 +173,14 @@ def process_user_input(role, month, identifier):
 
     target_row = None
     for row in rows[2:]:
+        # Пропускаем пустые строки
+        if not row or not any(row):
+            continue
         # если строка короче — пропускаем
         if personnel_idx >= len(row):
             continue
-        cell = str(row[personnel_idx]).replace(" ", "")
-        if cell == personnel_number:
+        cell = str(row[personnel_idx]).strip()
+        if cell == personnel_number.strip():
             target_row = row
             break
 
