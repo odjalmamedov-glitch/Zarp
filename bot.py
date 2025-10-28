@@ -1,3 +1,20 @@
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+import pandas as pd
+import requests
+
+# --- Токен бота (вставлен напрямую) ---
+TOKEN = "8299236175:AAErk_3tfiJoN_2sQigg5VekEyPzDcxP3qg"
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# --- Основной код бота ниже ---
+
 import os
 import logging
 import pandas as pd
