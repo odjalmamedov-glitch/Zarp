@@ -1,134 +1,149 @@
-import logging
-import pandas as pd
-import requests
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import gspread
+from google.oauth2.service_account import Credentials
+from datetime import datetime
 
-# 🔧 Настройки
-TOKEN = "8299236175:AAErk_3tfiJoN_2sQigg5VekEyPzDcxP3qg"
-SHEET_ID = "1npQ1h6ugPMZXxrNvngAbSsw0oiH2tT4Tx0cwPWqc_aU"
+# === НАСТРОЙКИ ===
+SPREADSHEET_ID = '1npQ1h6ugPMZXxrNvngAbSsw0oiH2tT4Tx0cwPWqc_aU'
 
-# Состояния пользователей
-user_state = {}
+ADMIN_SHEET = 'Администраторы'
+SFU_SHEET = 'СФУ'
+ADMIN_PREV_SHEET = 'Администраторы_prev.'
+SFU_PREV_SHEET = 'СФУ_prev.'
+EMPLOYEE_LIST_SHEET = 'Список сотрудников'
 
-# 🔹 Вспомогательные функции
-def get_csv_url(sheet_name):
-    return f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+ADMIN_COLUMNS = [
+    'Кол-во сим-карт', 'Бонус за UCELL', 'Кол-во лимитов с коэффом', 'План по лимитам',
+    'Выполнение плана по лимитам', 'Бонус за лимиты', 'Кол-во банковских карт',
+    'План по банковским картам', 'Выполнение плана по банковским картам',
+    'Бонус за банковским картам', 'SLA приёмки', 'Понижающий коэффициент SLA',
+    'Ошибочное оформление возвратов', 'Понижающий коэффициент возвратов',
+    'Результат ВЧЛ', 'ВЧЛ', 'Бонус за ВЧЛ', 'Стабильность',
+    'Общая сумма бонуса', 'Бонус + доп. начисления на руки',
+    'Гросс итог бонуса', 'Бонус + доп. начисления в гроссе'
+]
 
-def read_sheet(sheet_name):
-    url = get_csv_url(sheet_name)
-    df = pd.read_csv(url)
-    return df
+SFU_COLUMNS = [
+    'Кол-во сим-карт', 'План UCELL', 'Выполнение плана по UCELL', 'Бонус за UCELL',
+    'Банковские карты факт', 'План по банковским картам', 'Выполнение плана по банковским картам',
+    'Бонус за банковские карты', 'Банковские карты', 'Ошибочные оформления бк',
+    'Результат ВЧЛ', 'ВЧЛ', 'Бонус за ВЧЛ', 'Общая сумма бонуса',
+    'Бонус + доп. начисления на руки', 'Гросс итог бонуса', 'Бонус + доп. начисления в гроссе'
+]
 
-def parse_identifier(identifier):
+
+# === ФУНКЦИИ ===
+def get_service():
+    """Авторизация через Google Service Account"""
+    scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
+    creds = Credentials.from_service_account_file('credentials.json', scopes=scopes)
+    client = gspread.authorize(creds)
+    return client
+
+
+def normalize_date(date_value):
+    """Приводим даты к формату ДД.ММ.ГГГГ"""
+    if not date_value:
+        return ''
+    if isinstance(date_value, str):
+        return date_value.strip().replace('/', '.').replace('-', '.')
+    if isinstance(date_value, datetime):
+        return date_value.strftime('%d.%m.%Y')
+    return str(date_value)
+
+
+def validate_identifier(client, identifier):
+    """Проверяем идентификатор вида ДДММГГГГ-ЧЧЧЧ"""
+    print(f'Проверка идентификатора: {identifier}')
+    import re
+    match = re.match(r'^(\d{2})(\d{2})(\d{4})-(\d{4,5})$', identifier)
+    if not match:
+        return False, None, None
+
+    day, month, year, personnel_number = match.groups()
+    hire_date = f'{day}.{month}.{year}'
+
+    # Проверяем в листе "Список сотрудников"
+    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(EMPLOYEE_LIST_SHEET)
+    data = sheet.get_all_values()[1:]  # пропускаем заголовок
+    for row in data:
+        try:
+            sheet_number = str(row[3]).strip()  # столбец D
+            sheet_date = normalize_date(row[5])  # столбец F
+            if sheet_number == personnel_number and sheet_date == hire_date:
+                return True, personnel_number, hire_date
+        except IndexError:
+            continue
+    return False, None, None
+
+
+def get_sheet_name(role, month):
+    if role == 'Администратор':
+        return ADMIN_SHEET if month == 'Настоящий месяц' else ADMIN_PREV_SHEET
+    else:
+        return SFU_SHEET if month == 'Настоящий месяц' else SFU_PREV_SHEET
+
+
+def process_user_input(role, month, identifier):
+    start_time = datetime.now()
+    print(f'Запуск обработки: {role}, {month}, {identifier}')
+
+    if role not in ['Администратор', 'СФУ']:
+        return f'❌ Ошибка: неверная роль. Укажите "Администратор" или "СФУ".'
+
+    if month not in ['Настоящий месяц', 'Предыдущая зарплата']:
+        return f'❌ Ошибка: неверный месяц.'
+
+    client = get_service()
+
+    is_valid, personnel_number, hire_date = validate_identifier(client, identifier)
+    if not is_valid:
+        return f'❌ Ошибка: неверный идентификатор (формат ДДММГГГГ-ЧЧЧЧ).'
+
+    sheet_name = get_sheet_name(role, month)
+    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
+    data = sheet.get_all_values()
+
+    headers = data[1]
     try:
-        date_str, tab_number = identifier.split('-')
-        return date_str, tab_number
-    except Exception:
-        return None, None
+        personnel_idx = headers.index('Табельный номер')
+    except ValueError:
+        return '❌ Ошибка: столбец "Табельный номер" не найден.'
 
-# 🔹 Логика команд
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [["Администратор", "СФУ"]]
-    await update.message.reply_text(
-        "Выберите вашу должность:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
+    # Поиск строки по табельному номеру
+    target_row = None
+    for row in data[2:]:
+        if str(row[personnel_idx]).replace(' ', '') == personnel_number:
+            target_row = row
+            break
 
-async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text not in ["Администратор", "СФУ"]:
-        await update.message.reply_text("Выберите корректную должность.")
-        return
+    if not target_row:
+        return f'❌ Данные для табельного номера {personnel_number} не найдены.'
 
-    user_state[update.effective_chat.id] = {"position": text}
-    keyboard = [["Настоящий месяц", "Предыдущая зарплата"]]
-    await update.message.reply_text(
-        "Выберите период:",
-        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
+    columns = ADMIN_COLUMNS if role == 'Администратор' else SFU_COLUMNS
+    result_lines = [
+        f'📋 Данные для {role} (Табельный номер: {personnel_number}, Месяц: {month})',
+        f'Дата найма: {hire_date}',
+        ''
+    ]
+    for col in columns:
+        if col in headers:
+            idx = headers.index(col)
+            value = target_row[idx] if idx < len(target_row) else ''
+            result_lines.append(f'{col}: {value or "0"}')
+        else:
+            print(f'⚠️ Столбец "{col}" не найден')
 
-async def handle_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    period = update.message.text.strip()
+    elapsed = (datetime.now() - start_time).total_seconds() * 1000
+    print(f'✅ Готово за {elapsed:.0f} мс')
+    return '\n'.join(result_lines)
 
-    if chat_id not in user_state or "position" not in user_state[chat_id]:
-        await update.message.reply_text("Пожалуйста, начните заново /start")
-        return
 
-    user_state[chat_id]["period"] = period
-    await update.message.reply_text("Введите ваш идентификатор (пример: 11202025-12450)")
+if __name__ == '__main__':
+    # 🔧 Тестовый пример
+    role = 'Администратор'
+    month = 'Настоящий месяц'
+    identifier = '13102025-9224'  # формат ДДММГГГГ-ЧЧЧЧ
 
-async def handle_identifier(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    identifier = update.message.text.strip()
-    date_str, tab_number = parse_identifier(identifier)
-
-    if not date_str or not tab_number:
-        await update.message.reply_text("❌ Неверный формат. Пример: 11202025-12450")
-        return
-
-    info = user_state.get(chat_id, {})
-    position = info.get("position")
-    period = info.get("period")
-
-    if not position or not period:
-        await update.message.reply_text("❌ Начните с /start")
-        return
-
-    sheet_map = {
-        ("Администратор", "Настоящий месяц"): "Администраторы",
-        ("Администратор", "Предыдущая зарплата"): "Администраторы_prev.",
-        ("СФУ", "Настоящий месяц"): "СФУ",
-        ("СФУ", "Предыдущая зарплата"): "СФУ_prev."
-    }
-
-    sheet_name = sheet_map.get((position, period))
-    if not sheet_name:
-        await update.message.reply_text("❌ Ошибка выбора листа.")
-        return
-
-    try:
-        df_staff = read_sheet("Список сотрудников")
-        df_salary = read_sheet(sheet_name)
-    except Exception as e:
-        await update.message.reply_text("⚠️ Не удалось загрузить данные таблицы. Проверьте доступ.")
-        logging.error(e)
-        return
-
-    # Проверяем табельный номер и дату приёма
-    staff_row = df_staff[df_staff["D"].astype(str).str.strip() == tab_number]
-    if staff_row.empty:
-        await update.message.reply_text("❌ Табельный номер не найден в списке сотрудников.")
-        return
-
-    hire_date = staff_row.iloc[0]["F"].replace(".", "")
-    if date_str != hire_date:
-        await update.message.reply_text("❌ Дата приёма не совпадает.")
-        return
-
-    salary_row = df_salary[df_salary["D"].astype(str).str.strip() == tab_number]
-    if salary_row.empty:
-        await update.message.reply_text("❌ Зарплата не найдена в этом листе.")
-        return
-
-    # Формируем ответ
-    data = salary_row.to_dict(orient="records")[0]
-    text = f"✅ {position}\n📅 {period}\n\n"
-    for col, val in data.items():
-        text += f"{col}: {val}\n"
-
-    await update.message.reply_text(text)
-
-# 🔹 Основной запуск
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("^(Администратор|СФУ)$"), handle_position))
-    app.add_handler(MessageHandler(filters.Regex("^(Настоящий месяц|Предыдущая зарплата)$"), handle_period))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_identifier))
-
-    print("✅ Бот запущен. Нажми Ctrl+C для остановки.")
-    app.run_polling()
+    result = process_user_input(role, month, identifier)
+    print('\n=== РЕЗУЛЬТАТ ===')
+    print(result)
